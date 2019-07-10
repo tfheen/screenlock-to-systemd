@@ -15,3 +15,7 @@ following:
 - enable the service using `systemctl --user enable screenlock-to-systemd.service`
 
 Two sample units are provided: `pulsemixer-mute.service` and `pulsemixer-unmute.service`. Those are installed and enabled in the same fashion.
+
+## Limitations
+
+Currently only listens for the signal from the cinnamon screensaver. This should be trivial to extend for other screen savers.
