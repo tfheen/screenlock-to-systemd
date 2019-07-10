@@ -1,0 +1,3 @@
+[Unit]
+Conflicts=unlock-activated.target
+Description=This is activated when the session is locked

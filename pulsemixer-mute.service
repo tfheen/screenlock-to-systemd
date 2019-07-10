@@ -1,0 +1,10 @@
+[Unit]
+Description=Mute pulseaudio using pulsemixer
+ConditionFileIsExecutable=/usr/bin/pulsemixer
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/pulsemixer --mute
+
+[Install]
+WantedBy=lock-activated.target

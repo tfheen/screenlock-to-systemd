@@ -1,0 +1,10 @@
+[Unit]
+Description=unmute pulseaudio using pulsemixer
+ConditionFileIsExecutable=/usr/bin/pulsemixer
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/pulsemixer --unmute
+
+[Install]
+WantedBy=unlock-activated.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=Bind lock and unlock events to systemd
+After=display-manager.service
+
+[Service]
+Environment=RUST_LOG=info
+ExecStart=$HOME/.cargo/bin/screenlock-to-systemd
+Restart=always
+
+[Install]
+WantedBy=default.target
