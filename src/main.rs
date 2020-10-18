@@ -19,37 +19,46 @@ extern crate log;
 
 use dbus;
 
-use std::rc::Rc;
-use tokio::reactor::Handle;
-use tokio::runtime::current_thread::Runtime;
-use futures::{Stream};
-use dbus_tokio::AConnection;
+use dbus_tokio::connection;
 use clap::{App};
+use dbus::message::MatchRule;
+use futures::{Future, StreamExt};
 
-fn activate_systemd_unit(conn: &Rc<dbus::Connection>, unit_name: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let m = dbus::Message::new_method_call("org.freedesktop.systemd1", "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager", "StartUnit")?
-        .append2(unit_name, "replace");
-    conn.send_with_reply_and_block(m, 2000)?;
+async fn activate_systemd_unit(conn: &dbus::nonblock::SyncConnection, unit_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let proxy = dbus::nonblock::Proxy::new("org.freedesktop.systemd1", "/org/freedesktop/systemd1", std::time::Duration::from_secs(2), conn);
+    // TODO: Handle timeouts and errors here
+    let (_x,): (dbus::Path,) = proxy.method_call("org.freedesktop.systemd1.Manager", "StartUnit", (unit_name, "replace",)).await.unwrap();
     Ok(())
 }
 
-fn activate_lock_target(conn: &Rc<dbus::Connection>) {
-    let r = activate_systemd_unit(conn, "lock-activated.target");
+async fn activate_lock_target(conn: &dbus::nonblock::SyncConnection) {
+    let r = activate_systemd_unit(conn, "lock-activated.target").await;
     match r {
         Err(e) => error!("Failed to activate lock-activated.target: {}", e),
-        Ok(_) => {},
+        Ok(_) => {}
     }
 }
 
-fn activate_unlock_target(conn: &Rc<dbus::Connection>) {
-    let r = activate_systemd_unit(conn, "unlock-activated.target");
+async fn activate_unlock_target(conn: &dbus::nonblock::SyncConnection) {
+    let r = activate_systemd_unit(conn, "unlock-activated.target").await;
     match r {
         Err(e) => error!("Failed to activate unlock-activated.target: {}", e),
-        Ok(_) => {},
+        Ok(_) => {}
     }
 }
 
-fn main() {
+async fn screensaver_callback(conn: &dbus::nonblock::SyncConnection, screen_locked: bool) -> bool {
+    info!("Screen lock event happened on the bus, screen locked: {}", screen_locked);
+    if screen_locked {
+        activate_lock_target(conn).await;
+    } else {
+        activate_unlock_target(conn).await;
+    }
+    true
+}
+
+#[tokio::main]
+pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
 
     App::new("systemd-lock-handler")
@@ -60,38 +69,46 @@ fn main() {
 
     info!("Connecting to D-Bus");
 
-    // Let's start by starting up a connection to the session bus. We do not register a name
-    // because we do not intend to expose any objects on the bus.
-    let c = Rc::new(dbus::Connection::get_private(dbus::BusType::Session).unwrap());
+    // Connect to the D-Bus session bus (this is blocking, unfortunately).
+    let (resource, conn) = connection::new_session_sync()?;
 
-    // To receive D-Bus signals we need to add match that defines which signals should be forwarded
-    // to our application.
-    c.add_match("type=signal,sender=org.cinnamon.ScreenSaver,member=ActiveChanged").unwrap();
-
-    // Create Tokio event loop along with asynchronous connection object
-    let mut rt = Runtime::new().unwrap();
-    let aconn = AConnection::new(c.clone(), Handle::default(), &mut rt).unwrap();
-
-    // Create stream of all incoming D-Bus messages. On top of the messages stream create future,
-    // running forever, handling all incoming messages
-    let messages = aconn.messages().unwrap();
-    let signals = messages.for_each(|m| {
-        let headers = m.headers();
-        let member = headers.3.unwrap();
-        if member == "ActiveChanged" {
-            let screen_locked : bool = m.get1().unwrap();
-            info!("Screen lock event happened on the bus, screen locked: {}", screen_locked);
-            if screen_locked {
-                activate_lock_target(&c);
-            } else {
-                activate_unlock_target(&c);
-            }
-        } else {
-            debug!("Ignored message: {:?}", m)
-        }
-        Ok(())
+    // The resource is a task that should be spawned onto a tokio compatible
+    // reactor ASAP. If the resource ever finishes, you lost connection to D-Bus.
+    tokio::spawn(async {
+        let err = resource.await;
+        panic!("Lost connection to D-Bus: {}", err);
     });
 
+    info!("Connected, setting up matches");
+    // To receive D-Bus signals we need to add match that defines which signals should be forwarded
+    // to our application.
+    let mut tokens = Vec::new();
+    let mut signals = Vec::new();
+
+    let mut streams =  futures::stream::FuturesUnordered::new();
+
+    for intf in vec!["org.cinnamon.ScreenSaver", "org.gnome.ScreenSaver"] {
+        let mr = MatchRule::new_signal(intf, "ActiveChanged");
+        let mtc = conn.add_match(mr).await?;
+        let token = mtc.token();
+        let (incoming_signal, stream) = mtc.stream();
+        let stream = stream.for_each(|(_, (screen_locked,)): (_, (bool,))| {
+            let conn = conn.clone();
+            info!("Hello from stream {} happened on the bus!", screen_locked);
+            async move { screensaver_callback(&conn, screen_locked).await; }
+        });
+        signals.push(incoming_signal);
+        streams.push(stream);
+        tokens.push(token);
+    }
+    info!("bassfd");
+    while let Some(_) = streams.next().await {info!("xx")}
+
+    futures::future::pending::<()>().await;
+
     // Simultaneously run signal handling and method calling
-    rt.block_on(signals).unwrap();
+    for token in tokens {
+        conn.remove_match(token).await?;
+    }
+    unreachable!()
 }
